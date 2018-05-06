@@ -1,0 +1,33 @@
+sudo: required
+
+language:
+  - python
+
+services:
+  - docker
+
+install:
+  - sudo apt-get update
+  - sudo apt-get install --no-install-recommends --no-install-suggests -y build-essential libreadline-dev libffi-dev pkg-config
+  - sudo pip install pycodestyle
+  # clone micropython, belyalov's fork of micropython-lib
+  - git clone --recurse-submodules https://github.com/micropython/micropython.git
+  - git clone https://github.com/belyalov/micropython-lib.git
+  # make symlinks to required modules
+  - export MDST=~/.micropython/lib/
+  - mkdir -p $MDST
+  - ln -s `pwd`/micropython-lib/unittest/unittest.py $MDST
+  - ln -s `pwd`/micropython-lib/logging/logging.py $MDST
+  - ln -s `pwd`/micropython-lib/uasyncio.core/uasyncio/core.py `pwd`/micropython-lib/uasyncio/uasyncio
+  - ln -s `pwd`/micropython-lib/uasyncio.synchro/uasyncio/synchro.py `pwd`/micropython-lib/uasyncio/uasyncio
+  - ln -s `pwd`/micropython-lib/uasyncio/uasyncio $MDST/uasyncio
+  - ln -s `pwd`/micropython-lib/uasyncio/uasyncio $MDST/uasyncio
+  - ln -s `pwd`/tinymqtt $MDST/tinymqtt
+  # compile/install micropython
+  - sudo make -C micropython/ports/unix axtls install
+
+script:
+  # Run style checks
+  - pycodestyle --ignore=E501,W504 tinymqtt/ test/
+  # Run unittests
+  - ./test/test_mqtt.py
