@@ -33,8 +33,9 @@ def run_coro(coro):
 
 class MqttHelpersTests(unittest.TestCase):
     """Unittests for helpers"""
+
     def setUp(self):
-        self.cl = MQTTClient('localhost', 'client')
+        self.cl = MQTTClient('client', server='localhost')
 
     def testEncodeMsgLength(self):
         runs = [(0, b'\x00'),
