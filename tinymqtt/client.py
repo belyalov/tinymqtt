@@ -180,6 +180,7 @@ class MQTTClient:
             # Wake up writer process
             self.loop.call_soon(self.writer_task)
         except Exception as e:
+            self.connected = False
             self._sock.close()
             self._sock = None
             raise e
@@ -195,9 +196,8 @@ class MQTTClient:
         await self.writer.awrite(req)
 
     async def _close(self):
-        if not self.connected:
+        if self._sock is None:
             return
-        self.connected = False
         yield asyncio.IOWriteDone(self._sock)
         self._sock.close()
         self._sock = None
@@ -256,7 +256,7 @@ class MQTTClient:
                 now = int(time.time())
                 if now > self.last_pong + self.cfg.mqtt_keepalive:
                     log.error('PING timeout, reconnecting...')
-                    await self.reconnect(msg="PING timeout")
+                    self.reconnect(msg="PING timeout")
                     continue
                 # Send one more ping
                 self._schedule_write(self._ping())
@@ -269,59 +269,60 @@ class MQTTClient:
                 # raise
 
     async def _receiver_task(self):
-        while True:
-            # Hold lock until get connected to broker
-            await self.conn_lock.acquire()
-            try:
-                await self._close()
+        try:
+            while True:
+                # Hold lock until get connected to broker
+                await self.conn_lock.acquire()
+                try:
+                    await self._close()
+                    while True:
+                        try:
+                            await self._connect()
+                            break
+                        except Exception as e:
+                            log.error('Unable to connect {}'.format(e))
+                            await asyncio.sleep(self.cfg.mqtt_reconnect_timeout)
+                finally:
+                    self.conn_lock.release()
+                # Main loop (while connection alive)
                 while True:
                     try:
-                        if not self.connected:
-                            await self._connect()
+                        # Wait for message
+                        yield asyncio.IORead(self._sock)
+                        # Process message
+                        await self._process_msg()
+                    except (OSError, MQTTException) as e:
+                        log.error("Connection lost: {}".format(e))
+                        self.connected = False
+                        # restart connection loop
                         break
-                    except asyncio.CancelledError:
-                        return
                     except Exception as e:
-                        log.error('Unable to connect {}'.format(e))
-                        await asyncio.sleep(self.cfg.mqtt_reconnect_timeout)
-            finally:
-                self.conn_lock.release()
-            # Main loop (while connection alive)
-            while True:
-                try:
-                    # Wait for message
-                    yield asyncio.IORead(self._sock)
-                    # Process message
-                    await self._process_msg()
-                except (OSError, MQTTException) as e:
-                    log.error("Connection lost: {}".format(e))
-                    # go to connection loop
-                    break
-                except asyncio.CancelledError:
-                    log.debug("Received stopped")
-                    await self._close()
-                    return
-                except Exception as e:
-                    unhandled_exception(e)
-                    raise
+                        unhandled_exception(e)
+                        raise
+        except asyncio.CancelledError:
+            log.debug("Received stopped")
+            await self._close()
 
     async def _writer_task(self):
-        while True:
-            await self.conn_lock.acquire()
-            try:
-                while len(self.pending_writes):
-                    coro = self.pending_writes.pop()
-                    log.debug("execute write: {}".format(coro))
-                    await coro
-            finally:
-                self.conn_lock.release()
-            # Pause coroutine until resumed manually
-            try:
+        try:
+            while True:
+                await self.conn_lock.acquire()
+                try:
+                    while len(self.pending_writes):
+                        coro = self.pending_writes.pop()
+                        await coro
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    self.reconnect(msg="Write failed: {}".format(e))
+                finally:
+                    self.conn_lock.release()
+                # Pause coroutine until resumed manually
                 yield False
-            except asyncio.CancelledError:
-                log.debug("Writer stopped")
-                # Coroutine has been canceled
-                return
+        except asyncio.CancelledError:
+            log.debug("Writer stopped")
+            # Coroutine has been canceled
+            return
 
     def subscribe(self, topic, cb, qos=0):
         if qos not in [0, 1]:
@@ -348,9 +349,11 @@ class MQTTClient:
         self.loop.create_task(self.ping_task)
 
     def reconnect(self, msg='User Request'):
-        if self.connected:
-            self.receiver_task.pend_throw(MQTTException(msg))
-            self.loop.call_soon(self.receiver_task)
+        if not self.connected:
+            return
+        self.connected = False
+        self.receiver_task.pend_throw(MQTTException(msg))
+        self.loop.call_soon(self.receiver_task)
 
     def shutdown(self):
         if self.receiver_task:
