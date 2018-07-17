@@ -36,7 +36,7 @@ class Config():
 
 class MQTTClient:
 
-    def __init__(self, client_id, server='localhost', port=1883, user=None, password=None,
+    def __init__(self, client_id, server='localhost', port=1883, user='', password='',
                  keepalive=60, reconnect_timeout=5, clean_session=False, config=None):
         self.cfg = config
         if not self.cfg:
@@ -360,5 +360,8 @@ class MQTTClient:
             asyncio.cancel(self.receiver_task)
         if self.ping_task:
             asyncio.cancel(self.ping_task)
-        if self.writer_task:
+        # In case of now connection established this could fail, ignoring
+        try:
             asyncio.cancel(self.writer_task)
+        except Exception:
+            pass
