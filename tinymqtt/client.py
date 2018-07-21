@@ -21,8 +21,7 @@ class MQTTException(Exception):
 
 
 def unhandled_exception(e):
-    log.error('Unhandled exception {}'.format(e))
-    sys.print_exception(e)
+    log.exc(e)
 
 
 class Config():
@@ -46,8 +45,8 @@ class MQTTClient:
         self.cfg.add_param('mqtt_user', user, group='mqtt')
         self.cfg.add_param('mqtt_password', password, group='mqtt')
         self.cfg.add_param('mqtt_keepalive', keepalive, group='mqtt')
-        self.cfg.add_param('mqtt_reconnect_timeout', reconnect_timeout, group='mqtt')
 
+        self.reconnect_timeout = reconnect_timeout
         self.client_id = client_id
         self.clean_session = clean_session
         # Current state
@@ -146,14 +145,12 @@ class MQTTClient:
     async def _connect(self):
         try:
             if self._sock:
-                log.error('_connect(): socket is not None!')
                 self._sock.close()
             self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             addr = socket.getaddrinfo(self.cfg.mqtt_server, self.cfg.mqtt_port, 0, socket.SOCK_STREAM)[0][-1]
             self._sock.setblocking(False)
             # Make TCP connection
             try:
-                log.info("MQTT: connecting to {}:{}...".format(self.cfg.mqtt_server, self.cfg.mqtt_port))
                 self._sock.connect(addr)
             except OSError as e:
                 if e.args[0] != errno.EINPROGRESS:
@@ -173,7 +170,7 @@ class MQTTClient:
             self.last_pong = int(time.time())
             self.reader = asyncio.StreamReader(self._sock)
             self.writer = asyncio.StreamWriter(self._sock, {})
-            log.info("Connected to MQTT broker.")
+            log.info("Connected")
             # Connected!
             # Send CONNECT command before main cycle
             await self.writer.awrite(self._get_connect_command_msg())
@@ -209,19 +206,17 @@ class MQTTClient:
             # Connect ACK
             mlen = await self._decode_msglen()
             if mlen != 2:
-                raise MQTTException('Malformed ConnectACK response')
+                raise MQTTException('Invalid ConnectACK')
             resp = await self.reader.readexactly(mlen)
             if resp[1] != 0:
-                raise MQTTException('Server returned error for ConnectACK: {}'.format(resp[1]))
-            log.debug('Connect ACK')
+                raise MQTTException('Invalid ConnectACK')
         elif op == 0x90:
             # Subscribe ACK
             mlen = await self._decode_msglen()
             if mlen != 3:
-                raise MQTTException('Malformed SubscribeACK response')
+                raise MQTTException('Invalid SubscribeACK')
             resp = await self.reader.readexactly(mlen)
             msgid = int.from_bytes(resp[:2], 'big')
-            log.debug('Subscribe ACK for {}, QoS {}'.format(msgid, resp[2]))
         elif op == 0xd0:
             self.last_pong = int(time.time())
             await self.reader.readexactly(1)
@@ -234,11 +229,8 @@ class MQTTClient:
             msg = await self.reader.readexactly(mlen - tlen - 2)
             topic = topic.decode()
             msg = msg.decode()
-            log.debug('new message for "{}": "{}"'.format(topic, msg))
             if topic in self.topics:
                 self.topics[topic](msg)
-            else:
-                log.error('no handler found for "{}"'.format(topic))
 
     def _schedule_write(self, coro):
         self.pending_writes.append(coro)
@@ -255,18 +247,15 @@ class MQTTClient:
                 # Check for ping timeout
                 now = int(time.time())
                 if now > self.last_pong + self.cfg.mqtt_keepalive:
-                    log.error('PING timeout, reconnecting...')
                     self.reconnect(msg="PING timeout")
                     continue
                 # Send one more ping
                 self._schedule_write(self._ping())
             except asyncio.CancelledError:
-                log.debug("Pinger stopped")
                 # Coroutine has been canceled
                 return
             except Exception as e:
-                unhandled_exception(e)
-                # raise
+                log.exc(e)
 
     async def _receiver_task(self):
         try:
@@ -280,8 +269,8 @@ class MQTTClient:
                             await self._connect()
                             break
                         except Exception as e:
-                            log.error('Unable to connect {}'.format(e))
-                            await asyncio.sleep(self.cfg.mqtt_reconnect_timeout)
+                            log.error(e)
+                            await asyncio.sleep(self.reconnect_timeout)
                 finally:
                     self.conn_lock.release()
                 # Main loop (while connection alive)
@@ -292,15 +281,13 @@ class MQTTClient:
                         # Process message
                         await self._process_msg()
                     except (OSError, MQTTException) as e:
-                        log.error("Connection lost: {}".format(e))
+                        log.info("Connection lost")
                         self.connected = False
                         # restart connection loop
                         break
                     except Exception as e:
-                        unhandled_exception(e)
-                        raise
+                        log.exc(e)
         except asyncio.CancelledError:
-            log.debug("Received stopped")
             await self._close()
 
     async def _writer_task(self):
@@ -314,27 +301,24 @@ class MQTTClient:
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:
-                    self.reconnect(msg="Write failed: {}".format(e))
+                    self.reconnect(msg="Write failed")
                 finally:
                     self.conn_lock.release()
                 # Pause coroutine until resumed manually
                 yield False
         except asyncio.CancelledError:
-            log.debug("Writer stopped")
             # Coroutine has been canceled
             return
 
     def subscribe(self, topic, cb, qos=0):
         if qos not in [0, 1]:
-            raise MQTTException('Invalid QOS value, only [0, 1] supported')
-        if topic in self.topics:
-            raise MQTTException('Already subscribed')
+            raise MQTTException('Invalid QOS')
         self.topics[topic] = cb
         self._schedule_write(self._subscribe(topic, qos))
 
     def publish(self, topic, msg, retain=False, qos=0):
         if qos not in [0, 1]:
-            raise MQTTException('Invalid QOS value, only [0, 1] supported')
+            raise MQTTException('Invalid QOS')
         self._schedule_write(self._publish(topic, msg, retain, qos))
 
     def run(self, loop=None):
