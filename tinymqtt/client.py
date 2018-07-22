@@ -21,7 +21,7 @@ class MQTTException(Exception):
 
 
 def unhandled_exception(e):
-    log.exc(e)
+    log.exc(e, "")
 
 
 class Config():
@@ -255,7 +255,7 @@ class MQTTClient:
                 # Coroutine has been canceled
                 return
             except Exception as e:
-                log.exc(e)
+                log.exc(e, "")
 
     async def _receiver_task(self):
         try:
@@ -286,7 +286,7 @@ class MQTTClient:
                         # restart connection loop
                         break
                     except Exception as e:
-                        log.exc(e)
+                        log.exc(e, "")
         except asyncio.CancelledError:
             await self._close()
 
