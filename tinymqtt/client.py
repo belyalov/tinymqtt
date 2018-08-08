@@ -278,6 +278,8 @@ class MQTTClient:
                     try:
                         # Wait for message
                         yield asyncio.IORead(self._sock)
+                        if not self.connected:
+                            break
                         # Process message
                         await self._process_msg()
                     except (OSError, MQTTException) as e:
