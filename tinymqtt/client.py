@@ -56,7 +56,7 @@ class MQTTClient:
         # Socket
         self._sock = None
         # asyncs
-        self.loop = None
+        self.loop = asyncio.get_event_loop()
         self.receiver_task = None
         self.ping_task = None
         self.writer_task = None
@@ -235,8 +235,7 @@ class MQTTClient:
     def _schedule_write(self, coro):
         self.pending_writes.append(coro)
         # Wake up writer
-        if self.loop:
-            self.loop.call_soon(self.writer_task)
+        self.loop.call_soon(self.writer_task)
 
     async def _ping_task(self):
         while True:
@@ -323,11 +322,7 @@ class MQTTClient:
             raise MQTTException('Invalid QOS')
         self._schedule_write(self._publish(topic, msg, retain, qos))
 
-    def run(self, loop=None):
-        if loop:
-            self.loop = loop
-        else:
-            self.loop = asyncio.get_event_loop()
+    def run(self):
         self.receiver_task = self._receiver_task()
         self.ping_task = self._ping_task()
         self.writer_task = self._writer_task()
