@@ -30,13 +30,8 @@ def unhandled_exception(e):
 
 class MQTTClient:
 
-    def __init__(self, client_id, server='localhost', port=1883, user='', password='',
-                 keepalive=60, reconnect_timeout=5, clean_session=False):
+    def __init__(self, client_id, keepalive=60, reconnect_timeout=5, clean_session=False):
         self.client_id = client_id
-        self.server = server
-        self.port = port
-        self.user = user
-        self.password = password
         self.keepalive = keepalive
         self.reconnect_timeout = reconnect_timeout
         self.clean_session = clean_session
@@ -304,7 +299,12 @@ class MQTTClient:
             raise MQTTException('Invalid QOS')
         self._schedule_write(self._publish(topic, msg, retain, qos))
 
-    def run(self):
+    def run(self, server='localhost', port=1883, user='', password=''):
+        self.server = server
+        self.port = port
+        self.user = user
+        self.password = password
+
         self.reconnect()
 
     def cancel(self, task):

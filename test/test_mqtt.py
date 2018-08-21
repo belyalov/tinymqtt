@@ -144,7 +144,7 @@ class MqttHelpersTests(unittest.TestCase):
     """Unittests for helpers"""
 
     def setUp(self):
-        self.cl = MQTTClient('client', server='localhost')
+        self.cl = MQTTClient('client')
         self.cl.writer = MockWriter()
 
     def testEncodeMsgLength(self):
@@ -215,7 +215,7 @@ class MqttTests(unittest.TestCase):
         tinymqtt.client.getaddrinfo = mock_getaddrinfo
         self.loop = uasyncio.get_event_loop()
         self.loop.clear()
-        self.cl = MQTTClient('client', server='localhost')
+        self.cl = MQTTClient('client')
 
     def testConnect(self):
         # It is OK to subscribe / publish msg when connection is not active
