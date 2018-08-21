@@ -11,7 +11,7 @@ Simple and lightweight (thus - *tiny*) MQTT server for tiny devices like **ESP82
 ### Requirements
 * [uasyncio](https://github.com/micropython/micropython-lib/tree/master/uasyncio) - micropython version of *async* library for big brother - python3.
 * [uasyncio-core](https://github.com/micropython/micropython-lib/tree/master/uasyncio.core)
-* + synchro - doc in progress
+* [logging](https://github.com/micropython/micropython-lib/tree/master/logging)
 
 
 More documentation and examples coming soon! :)
