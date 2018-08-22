@@ -17,6 +17,8 @@ from tinymqtt import MQTTClient
 
 # Exception to be raised by MockSocketConnect()
 ConnectException = OSError(uerrno.EINPROGRESS)
+MockReaderData = ''
+MockReaderException = None
 # Result returned by poll()
 PollResult = 0
 
@@ -38,17 +40,19 @@ class MockPoll():
 class MockReader():
     """Mock for coroutine reader class"""
 
-    def __init__(self, payload, error=None):
-        self.payload = payload
-        self.error = error
+    def __init__(self, ios=None):
         self.idx = 0
+        self.ios = ios
 
     async def readexactly(self, n):
-        if self.error:
-            raise self.error
-        ret = self.payload[self.idx:self.idx + n]
+        if MockReaderException is not None:
+            raise MockReaderException
+        ret = MockReaderData[self.idx:self.idx + n]
         self.idx += n
         return ret
+
+    async def aclose(self):
+        pass
 
 
 class MockWriter():
@@ -159,6 +163,7 @@ class MqttHelpersTests(unittest.TestCase):
             self.assertEqual(self.cl._encode_msglen(x), exp)
 
     def testDecodeMsgLength(self):
+        global MockReaderData
         runs = [(b'\x00', 0),
                 (b'\x01', 1),
                 (b'\x7f', 127),
@@ -167,8 +172,9 @@ class MqttHelpersTests(unittest.TestCase):
                 (b'\xff\x01', 255),
                 ]
         for r in runs:
-            self.cl.reader = MockReader(r[0])
-            val = run_coro(self.cl._decode_msglen())
+            MockReaderData = r[0]
+            reader = MockReader()
+            val = run_coro(self.cl._decode_msglen(reader))
             self.assertEqual(val, r[1])
 
     def testConnectMsg(self):
@@ -203,13 +209,15 @@ class MqttHelpersTests(unittest.TestCase):
 
 class MqttTests(unittest.TestCase):
 
-    def cb(self):
-        self.cb_called = True
+    def cb(self, msg):
+        self.cb_msg = msg
 
     def setUp(self):
         logging._level = logging.WARNING
+        # Mock reader
+        uasyncio.StreamReader = MockReader
+        self.cb_msg = None
         # Mock socket.socket()
-        self.cb_called = False
         tinymqtt.client.socket = MockSocket
         tinymqtt.client.poll = MockPoll
         tinymqtt.client.getaddrinfo = mock_getaddrinfo
@@ -218,6 +226,7 @@ class MqttTests(unittest.TestCase):
         self.cl = MQTTClient('client')
 
     def testConnect(self):
+        # global MockRe
         # It is OK to subscribe / publish msg when connection is not active
         self.cl.subscribe('dummy', self.cb)
         self.cl.publish('dummy', '1')
@@ -226,8 +235,7 @@ class MqttTests(unittest.TestCase):
         self.assertEqual(self.loop.queue_len(), 1)
         # Run "happy path" where connection can be established, Expect IOWrite to be yielded
         task = self.loop.pop()
-        res = next(task)
-        self.assertEqual(uasyncio.IOWrite, type(res))
+        self.assertEqual(uasyncio.IOWrite, type(next(task)))
         # Resume task, emulating that connection established
         with self.assertRaises(StopIteration):
             next(task)
@@ -284,6 +292,28 @@ class MqttTests(unittest.TestCase):
         self.assertEqual(writer.history[0][0], 0x30)    # PUBLISH
         self.assertEqual(writer.history[1][0], 0x30)
 
+    def testSubscribePublish(self):
+        # Make connection / subscribe to "topic1"
+        self.cl.subscribe('topic1', self.cb)
+        self.cl.run()
+        task = self.loop.pop()
+        res = next(task)
+        self.assertEqual(uasyncio.IOWrite, type(res))
+        with self.assertRaises(StopIteration):
+            next(task)
+        self.loop.clear()
+        self.assertEqual(len(self.cl.pend_writes), 2)  # CONNECT + SUBSCRIBE
+        self.assertTrue(self.cl.connected)
+
+        # Wakeup reader to read emulated publish message from "network"
+        global MockReaderData
+        MockReaderData = b'\x30\x14\x00\x06topic1message blah'
+        self.assertEqual(uasyncio.IORead, type(next(self.cl.reader_task)))
+        self.assertEqual(uasyncio.IORead, type(next(self.cl.reader_task)))
+        # At this point reader_task should parse message and call callback
+        # set by subscribe() function
+        self.assertEqual('message blah', self.cb_msg)
+
     def testConnectFailed(self):
         # First scenario - test when connect() function returns error
         global ConnectException
@@ -292,9 +322,9 @@ class MqttTests(unittest.TestCase):
         # Make 2 attempts to "connect"
         task = self.loop.pop()
         for z in range(2):
-            res = next(task)
             # expect task to yield with asyncio.sleep(5)
-            self.assertEqual(res, 5000)
+            self.assertEqual(uasyncio.IOWriteDone, type(next(task)))
+            self.assertEqual(5000, next(task))
             self.assertIsNotNone(self.cl.connect_task)
         self.assertFalse(self.cl.connected)
 
@@ -302,11 +332,9 @@ class MqttTests(unittest.TestCase):
         ConnectException = OSError(uerrno.EINPROGRESS)
         global PollResult
         PollResult = uselect.POLLERR
-        res = next(task)
-        # connect() succeed
-        self.assertEqual(uasyncio.IOWrite, type(res))
-        res = next(task)
-        self.assertEqual(res, 5000)
+        self.assertEqual(uasyncio.IOWrite, type(next(task)))
+        self.assertEqual(uasyncio.IOWriteDone, type(next(task)))
+        self.assertEqual(5000, next(task))
         self.assertFalse(self.cl.connected)
 
         # Now let it be connected
@@ -337,20 +365,19 @@ class MqttTests(unittest.TestCase):
         self.assertTrue(self.cl.connected)
 
         # Mock reader / writer. Reader set to raise exception
-        self.cl.reader = MockReader('123', error=OSError(uerrno.ECONNABORTED))
+        # self.cl.reader = MockReader('123', error=OSError(uerrno.ECONNABORTED))
         self.cl.writer = MockWriter()
 
         # Run all tasks once
-        res = next(self.cl.reader_task)
-        self.assertEqual(uasyncio.IORead, type(res))
-        res = next(self.cl.writer_task)
-        self.assertEqual(False, res)
-        res = next(self.cl.ping_task)
-        self.assertEqual(self.cl.keepalive * 1000, res)
+        self.assertEqual(uasyncio.IORead, type(next(self.cl.reader_task)))
+        self.assertEqual(False, next(self.cl.writer_task))
+        self.assertEqual(self.cl.keepalive * 1000, next(self.cl.ping_task))
 
         # Wakeup reader and emulate read error
+        global MockReaderException
+        MockReaderException = OSError(uerrno.ECONNABORTED)
         with self.assertRaises(StopIteration):
-            res = next(self.cl.reader_task)
+            next(self.cl.reader_task)
         self.assertFalse(self.cl.connected)
         # Reader task finished. Before exit it should call reconnect() method:
         self.assertIsNone(self.cl.reader_task)
@@ -470,7 +497,6 @@ class MqttTests(unittest.TestCase):
         # Resume ping task - expect PING message sent
         res = next(self.cl.ping_task)
         self.assertEqual(self.cl.keepalive // 2 * 1000, res)
-        # print("\n!!", self.loop.queue)
         # _ping message in queue present
         self.assertEqual(len(self.cl.pend_writes), 1)
         # Emulate that we've got PONG response

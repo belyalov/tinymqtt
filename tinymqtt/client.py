@@ -66,11 +66,11 @@ class MQTTClient:
             if x <= 0:
                 return ret[:i]
 
-    async def _decode_msglen(self):
+    async def _decode_msglen(self, reader):
         multiplier = 1
         value = 0
         while True:
-            digit = (await self.reader.readexactly(1))[0]
+            digit = (await reader.readexactly(1))[0]
             value += (digit & 0x7f) * multiplier
             multiplier *= 0x80
             if (digit & 0x80) == 0:
@@ -131,38 +131,38 @@ class MQTTClient:
         req = b'\xc0\x00'
         await self.writer.awrite(req)
 
-    async def _process_msg(self):
+    async def _process_msg(self, reader):
         # Read operation type
-        op = (await self.reader.readexactly(1))[0]
+        op = (await reader.readexactly(1))[0]
         if op == 0x20:
             # Connect ACK
-            mlen = await self._decode_msglen()
+            mlen = await self._decode_msglen(reader)
             if mlen != 2:
                 raise MQTTException('Invalid ConnectACK')
-            resp = await self.reader.readexactly(mlen)
+            resp = await reader.readexactly(mlen)
             if resp[1] != 0:
                 raise MQTTException('Invalid ConnectACK')
         elif op == 0x90:
             # Subscribe ACK
-            mlen = await self._decode_msglen()
+            mlen = await self._decode_msglen(reader)
             if mlen != 3:
                 raise MQTTException('Invalid SubscribeACK')
-            resp = await self.reader.readexactly(mlen)
+            resp = await reader.readexactly(mlen)
             # msgid = int.from_bytes(resp[:2], 'big')
         elif op == 0xd0:
             self.last_pong = int(time.time())
-            await self.reader.readexactly(1)
+            await reader.readexactly(1)
         elif op == 0x30:
             # Incoming message (Publish from server)
-            mlen = await self._decode_msglen()
-            resp = await self.reader.readexactly(2)
+            mlen = await self._decode_msglen(reader)
+            resp = await reader.readexactly(2)
             tlen = int.from_bytes(resp, 'big')
-            topic = await self.reader.readexactly(tlen)
-            msg = await self.reader.readexactly(mlen - tlen - 2)
+            topic = await reader.readexactly(tlen)
+            msg = await reader.readexactly(mlen - tlen - 2)
             topic = topic.decode()
             msg = msg.decode()
             if topic in self.topics:
-                self.topics[topic](msg)
+                self.topics[topic][0](msg)
 
     def _schedule_write(self, data, append=True):
         if append:
@@ -215,15 +215,14 @@ class MQTTClient:
                     # v is tuple (callback, qos)
                     self._schedule_write(self._subscribe(t, v[1]))
                 self.connect_task = None
-
                 return
-
             except uasyncio.CancelledError:
                 sock.close()
                 return
             except Exception as e:
                 # Unable to connect, close everything and wait for next attempt
-                print("Unable to connect", e)
+                log.info("Unable to connect: {}".format(e))
+                yield uasyncio.IOWriteDone(sock)
                 sock.close()
                 self.connected = False
                 await uasyncio.sleep(self.reconnect_timeout)
@@ -233,18 +232,17 @@ class MQTTClient:
             # Wait for message, then process it
             while True:
                 yield uasyncio.IORead(reader.ios)
-                await self._process_msg()
+                await self._process_msg(reader)
         except (OSError, MQTTException) as e:
             log.info("Connection lost: %s", e)
             self.reconnect()
         except uasyncio.CancelledError:
-            log.info("CANCELLED!!!!")
             return
         except Exception as e:
             log.exc(e, "")
             self.reconnect()
         finally:
-            reader.ios.close()
+            await reader.aclose()
 
     async def _writer_task(self):
         try:
