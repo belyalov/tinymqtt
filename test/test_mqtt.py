@@ -212,6 +212,10 @@ class MqttTests(unittest.TestCase):
     def cb(self, msg):
         self.cb_msg = msg
 
+    async def coro(self):
+        # Wait for message on 'dummy' topic
+        self.coro_msg = await self.cl.wait('topic1')
+
     def setUp(self):
         logging._level = logging.WARNING
         # Mock reader
@@ -226,12 +230,11 @@ class MqttTests(unittest.TestCase):
         self.cl = MQTTClient('client')
 
     def testConnect(self):
-        # global MockRe
+        self.cl.run()
         # It is OK to subscribe / publish msg when connection is not active
         self.cl.subscribe('dummy', self.cb)
         self.cl.publish('dummy', '1')
         # Ensure that only one connect_task in queue after run()
-        self.cl.run()
         self.assertEqual(self.loop.queue_len(), 1)
         # Run "happy path" where connection can be established, Expect IOWrite to be yielded
         task = self.loop.pop()
@@ -314,6 +317,12 @@ class MqttTests(unittest.TestCase):
         # set by subscribe() function
         self.assertEqual('message blah', self.cb_msg)
 
+        # shutdown mqtt and try publish msg - should not be queued
+        self.cl.pend_writes = []
+        self.cl.shutdown()
+        self.cl.publish('111', '23232')
+        self.assertEqual(self.cl.pend_writes, [])
+
     def testConnectFailed(self):
         # First scenario - test when connect() function returns error
         global ConnectException
@@ -371,7 +380,7 @@ class MqttTests(unittest.TestCase):
         # Run all tasks once
         self.assertEqual(uasyncio.IORead, type(next(self.cl.reader_task)))
         self.assertEqual(False, next(self.cl.writer_task))
-        self.assertEqual(self.cl.keepalive * 1000, next(self.cl.ping_task))
+        self.assertEqual(self.cl.keepalive // 2 * 1000, next(self.cl.ping_task))
 
         # Wakeup reader and emulate read error
         global MockReaderException
@@ -428,7 +437,7 @@ class MqttTests(unittest.TestCase):
         res = next(self.cl.writer_task)
         self.assertEqual(False, res)
         res = next(self.cl.ping_task)
-        self.assertEqual(self.cl.keepalive * 1000, res)
+        self.assertEqual(self.cl.keepalive // 2 * 1000, res)
 
         # Set Mock Writer set to raise exception
         self.cl.writer = MockWriter(OSError(uerrno.ECONNABORTED))
@@ -492,7 +501,7 @@ class MqttTests(unittest.TestCase):
         res = next(self.cl.writer_task)
         self.assertEqual(False, res)
         res = next(self.cl.ping_task)
-        self.assertEqual(self.cl.keepalive * 1000, res)
+        self.assertEqual(self.cl.keepalive // 2 * 1000, res)
 
         # Resume ping task - expect PING message sent
         res = next(self.cl.ping_task)

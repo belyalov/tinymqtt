@@ -36,6 +36,7 @@ class MQTTClient:
         self.reconnect_timeout = reconnect_timeout
         self.clean_session = clean_session
         # Current state
+        self.active = False
         self.connected = False
         self.last_pong = 0
         # Current MsgID
@@ -48,8 +49,9 @@ class MQTTClient:
         self.ping_task = None
         self.connect_task = None
         self.resumed = False
-        # Topics
         self.topics = {}
+        # messages associated with coroutine
+        self.coro_msg = {}
         # Pending writes queue
         self.pend_writes = []
 
@@ -162,7 +164,12 @@ class MQTTClient:
             topic = topic.decode()
             msg = msg.decode()
             if topic in self.topics:
-                self.topics[topic][0](msg)
+                cb = self.topics[topic][0]
+                if isinstance(cb, uasyncio.type_gen):
+                    self.coro_msg[cb] = msg
+                    self.loop.call_soon(cb)
+                else:
+                    cb(msg)
 
     def _schedule_write(self, data, append=True):
         if append:
@@ -272,7 +279,7 @@ class MQTTClient:
         while True:
             try:
                 # Sleep for keepalive timeout, that send ping
-                await uasyncio.sleep(self.keepalive)
+                await uasyncio.sleep(self.keepalive // 2)
                 self._schedule_write(self._ping())
                 # Sleep for half of keepalive and check for PONG from server
                 await uasyncio.sleep(self.keepalive // 2)
@@ -288,11 +295,26 @@ class MQTTClient:
     def subscribe(self, topic, cb, qos=0):
         if qos < 0 and qos > 1:
             raise MQTTException('Invalid QOS')
-        self.topics[topic] = (cb, qos)
-        if self.connected:
+        # If connection is alive - subscribe immediately,
+        # otherwise - subscription to all topics will be made after
+        # successful connection
+        if topic not in self.topics and self.connected:
             self._schedule_write(self._subscribe(topic, qos))
+        self.topics[topic] = (cb, qos)
+
+    async def wait(self, topic, qos=0):
+        self.subscribe(topic, self.loop.cur_task, qos)
+        # Suspend current coro - until message arrives
+        yield False
+        # Message arrived
+        return self.coro_msg.pop(self.loop.cur_task)
 
     def publish(self, topic, msg, retain=False, qos=0):
+        if not self.active:
+            # skip publish in case of mqtt inactive:
+            # 1. disabled by shutdown()
+            # 2. not started by run()
+            return
         if qos < 0 and qos > 1:
             raise MQTTException('Invalid QOS')
         self._schedule_write(self._publish(topic, msg, retain, qos))
@@ -302,6 +324,7 @@ class MQTTClient:
         self.port = port
         self.user = user
         self.password = password
+        self.active = True
 
         self.reconnect()
 
@@ -331,4 +354,5 @@ class MQTTClient:
             self.loop.call_soon(self.connect_task)
 
     def shutdown(self):
+        self.active = False
         self.cancel_tasks()
